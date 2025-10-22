@@ -1,0 +1,210 @@
+# =================================================================
+# GitHub Actions CI/CD Pipeline for Express.js Application
+# =================================================================
+# ชื่อ workflow
+name: CI/CD Pipeline - Express App
+
+# =================================================================
+# TRIGGERS: กำหนดเหตุการณ์ที่จะทำให้ workflow ทำงาน
+# =================================================================
+
+# กำหนด Trigger: ให้ Workflow ทำงานทุกครั้งที่มีการ push ไปยัง branch 'main'
+on:
+  push:
+    branches:
+      - main
+    # ถ้าต้องการ build ตอนแท็กด้วย ให้เปิดบรรทัดด้านล่างนี้
+    # tags: [ 'v*.*.*' ]
+
+# กำหนด Trigger: ให้ Workflow ทำงานทุกครั้งที่มีการสร้าง Pull Request ไปยัง branch 'main'
+  pull_request:
+    branches:
+      - main
+
+# กำหนด Trigger: แบบ Manual (Workflow Dispatch) เพื่อให้สามารถกดรันได้เองจากหน้า GitHub
+  workflow_dispatch:
+
+# =================================================================
+# ENVIRONMENT VARIABLES: กำหนดตัวแปรที่ใช้ทั้ง Workflow
+# =================================================================
+env:
+  NODE_VERSION: '22'
+  DOCKER_IMAGE: 'iamsamitdev/express-app-action'  # เปลี่ยนเป็น Docker Hub username ของคุณ
+  CONTAINER_NAME: 'express-app-prod' # ตั้งชื่อ container ที่จะรันบนเครื่อง Windows ของคุณ
+
+# =================================================================
+# JOBS: กำหนด Jobs ที่จะรันใน Workflow
+# =================================================================
+jobs:
+  # Job 1: Build และ Test (ทำงานบน GitHub)
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: Checkout code จาก repository
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      # Step 2: ตั้งค่า Node.js environment
+      - name: 🔧 Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      # Step 3: แสดง Node.js และ npm version
+      - name: 📋 Display Node.js and npm versions
+        run: |
+          echo "Node.js version: $(node --version)"
+          echo "npm version: $(npm --version)"
+      
+      # Step 4: ติดตั้ง dependencies
+      - name: 📦 Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+      
+      # Step 5: รัน tests พร้อม coverage
+      - name: 🧪 Run tests with coverage
+        run: npm test
+      
+      # Step 6: Upload coverage report (optional)
+      - name: 📊 Upload coverage report
+        if: always() && hashFiles('coverage/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7 # เก็บรายงานไว้ 7 วัน
+
+  # Job 2: Build และ Push Docker Image (ทำงานบน GitHub)
+  build-docker:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    # รันเฉพาะเมื่อ push ไปยัง main branch หรือ manual dispatch
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      # Step 1: Checkout code
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      # Step 2: ตั้งค่า Docker Buildx
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Step 3: Login to Docker Hub
+      # หมายเหตุ: ต้องตั้งค่า DOCKERHUB_USERNAME และ DOCKERHUB_TOKEN ใน GitHub Secrets
+      - name: 🔐 Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      # Step 4: สร้าง Docker image metadata (tags และ labels)
+      - name: 🏷️ Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      # Step 5: Build และ Push Docker image
+      - name: 🐳 Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      # Step 6: แสดง image digest
+      - name: 📝 Image digest
+        run: |
+          echo "Image pushed successfully!"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+
+  # Job 3: Security Scan (Optional - ต้องติดตั้ง Trivy) (ทำงานบน GitHub)
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # เพิ่ม permissions สำหรับ security-events
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    
+    steps:
+      # Step 1: Checkout code
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      # Step 2: รัน Trivy vulnerability scanner
+      - name: 🔒 Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+      
+      # Step 3: Upload Trivy results to GitHub Security
+      - name: 📤 Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+  # =================================================================
+  # Job 4: Deploy (ปรับปรุงใหม่: ทำงานบนเครื่อง Windows ของคุณ)
+  # =================================================================
+  deploy-to-windows:
+    name: Deploy to Local Windows Docker
+    
+    # 1. ระบุให้รันบน runner ที่เราเพิ่งสร้าง
+    runs-on: self-hosted-windows-docker 
+    
+    needs: [build-docker, security-scan]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    
+    # 2. ใช้ environment 'production' (ไม่บังคับ แต่เป็น practice ที่ดี)
+    environment:
+      name: production
+      url: http://localhost:3000 # URL ที่ทดสอบบนเครื่องคุณ
+    
+    steps:
+      # 3. รันคำสั่ง PowerShell บนเครื่อง Windows ของคุณ
+      - name: 🚀 Deploy to Docker Desktop
+        # ใช้ 'shell: pwsh' เพื่อความชัดเจน (แม้ว่าจะเป็น default บน Windows runner)
+        shell: pwsh 
+        run: |
+          echo "Starting deployment on Windows Self-Hosted Runner..."
+          
+          # 4. ดึง image ล่าสุดที่เพิ่ง build เสร็จ
+          echo "Pulling latest image: ${{ env.DOCKER_IMAGE }}:latest"
+          docker pull ${{ env.DOCKER_IMAGE }}:latest
+          
+          # 5. หยุดและลบ container เก่า (ถ้ามี)
+          # ใช้ -ErrorAction SilentlyContinue เพื่อไม่ให้ script ล้มเหลวถ้าไม่มี container เก่า
+          echo "Stopping and removing old container: ${{ env.CONTAINER_NAME }}"
+          docker stop ${{ env.CONTAINER_NAME }} -ErrorAction SilentlyContinue
+          docker rm ${{ env.CONTAINER_NAME }} -ErrorAction SilentlyContinue
+          
+          # 6. รัน container ใหม่
+          echo "Running new container on port 3000..."
+          docker run -d --name ${{ env.CONTAINER_NAME }} -p 3000:3000 --restart always ${{ env.DOCKER_IMAGE }}:latest
+          
+          echo "Deployment complete! Access at http://localhost:3000"
