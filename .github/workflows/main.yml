@@ -189,7 +189,8 @@ jobs:
       # 3. รันคำสั่ง PowerShell บนเครื่อง Windows ของคุณ
       - name: 🚀 Deploy to Docker Desktop
         # ใช้ 'shell: pwsh' เพื่อความชัดเจน (แม้ว่าจะเป็น default บน Windows runner)
-        shell: pwsh 
+        # shell: pwsh 
+        shell: cmd
         run: |
           echo "Starting deployment on Windows Self-Hosted Runner..."
           
